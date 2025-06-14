@@ -12,11 +12,14 @@ from esphome.const import (
 
 DEPENDENCIES = ["i2c"]
 
-sdp6x_ns = cg.esphome_ns.namespace("sdp6x")
-SDP6XComponent = sdp6x_ns.class_("SDP6XComponent", cg.PollingComponent, i2c.I2CDevice)
-
+# Configuration constants
 CONF_DIFFERENTIAL_PRESSURE = "differential_pressure"
 CONF_TEMPERATURE = "temperature"
+CONF_RAW = "raw"
+
+# Namespace and component class
+sdp6x_ns = cg.esphome_ns.namespace("sdp6x")
+SDP6XComponent = sdp6x_ns.class_("SDP6XComponent", cg.PollingComponent, i2c.I2CDevice)
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -27,12 +30,20 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=2,
                 device_class=DEVICE_CLASS_PRESSURE,
                 state_class=STATE_CLASS_MEASUREMENT,
+            ).extend(
+                {
+                    cv.Optional(CONF_RAW, default=False): cv.boolean,
+                }
             ),
             cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 accuracy_decimals=1,
                 device_class=DEVICE_CLASS_TEMPERATURE,
                 state_class=STATE_CLASS_MEASUREMENT,
+            ).extend(
+                {
+                    cv.Optional(CONF_RAW, default=False): cv.boolean,
+                }
             ),
         }
     )
@@ -47,9 +58,15 @@ async def to_code(config):
     await i2c.register_i2c_device(var, config)
 
     if CONF_DIFFERENTIAL_PRESSURE in config:
-        sens = await sensor.new_sensor(config[CONF_DIFFERENTIAL_PRESSURE])
+        conf = config[CONF_DIFFERENTIAL_PRESSURE]
+        sens = await sensor.new_sensor(conf)
         cg.add(var.set_pressure_sensor(sens))
+        if CONF_RAW in conf:
+            cg.add(var.set_pressure_raw(conf[CONF_RAW]))
 
     if CONF_TEMPERATURE in config:
-        sens = await sensor.new_sensor(config[CONF_TEMPERATURE])
+        conf = config[CONF_TEMPERATURE]
+        sens = await sensor.new_sensor(conf)
         cg.add(var.set_temperature_sensor(sens))
+        if CONF_RAW in conf:
+            cg.add(var.set_temperature_raw(conf[CONF_RAW]))
