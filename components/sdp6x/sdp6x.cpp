@@ -79,7 +79,7 @@ void SDP6XComponent::update() {
 }
 
 bool SDP6XComponent::start_continuous_measurement_() {
-  if (!this->write_bytes_raw(SDP6X_CMD_START_CONT_MEAS, sizeof(SDP6X_CMD_START_CONT_MEAS))) {
+  if (!this->write_bytes(0, SDP6X_CMD_START_CONT_MEAS, sizeof(SDP6X_CMD_START_CONT_MEAS))) {
     ESP_LOGE(TAG, "Failed to send start continuous measurement command");
     return false;
   }
@@ -91,7 +91,14 @@ bool SDP6XComponent::start_continuous_measurement_() {
 bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
   uint8_t data[9];
   
-  if (!this->read_bytes_raw(data, 9)) {
+  if (!this->write_bytes(0, SDP6X_CMD_READ_MEAS, sizeof(SDP6X_CMD_READ_MEAS))) {
+    ESP_LOGE(TAG, "Failed to send read measurement command");
+    return false;
+  }
+  
+  delay(10);
+  
+  if (!this->read_bytes(0, data, 9)) {
     ESP_LOGE(TAG, "Failed to read measurement data");
     return false;
   }
