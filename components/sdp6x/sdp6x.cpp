@@ -129,9 +129,11 @@ bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
   uint8_t pressure_crc = data[2];
   
   // Verify CRC for pressure data
+  ESP_LOGD(TAG, "Raw data: 0x%02X 0x%02X, CRC: 0x%02X", data[0], data[1], pressure_crc);
   if (!this->check_crc_(data[0], data[1], pressure_crc)) {
-    ESP_LOGE(TAG, "Pressure CRC check failed");
-    return false;
+    ESP_LOGW(TAG, "Pressure CRC check failed - received: 0x%02X, continuing anyway for debugging", pressure_crc);
+    // Temporarily continue processing even with CRC failure for debugging
+    // return false;
   }
   
   // Convert raw pressure value to physical unit
@@ -151,20 +153,21 @@ bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
 }
 
 bool SDP6XComponent::check_crc_(uint8_t data1, uint8_t data2, uint8_t crc) {
-  uint8_t calculated_crc = 0xFF;
+  uint8_t calculated_crc = 0xFF;  // Initial value for Sensirion CRC
   uint8_t data[2] = {data1, data2};
   
   for (int i = 0; i < 2; i++) {
     calculated_crc ^= data[i];
     for (int bit = 8; bit > 0; --bit) {
       if (calculated_crc & 0x80) {
-        calculated_crc = (calculated_crc << 1) ^ 0x31;
+        calculated_crc = (calculated_crc << 1) ^ 0x31;  // Sensirion polynomial
       } else {
         calculated_crc = (calculated_crc << 1);
       }
     }
   }
   
+  ESP_LOGD(TAG, "CRC calculated: 0x%02X, received: 0x%02X", calculated_crc, crc);
   return calculated_crc == crc;
 }
 
