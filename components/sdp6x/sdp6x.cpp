@@ -153,14 +153,15 @@ bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
 }
 
 bool SDP6XComponent::check_crc_(uint8_t data1, uint8_t data2, uint8_t crc) {
-  uint8_t calculated_crc = 0xFF;  // Initial value for Sensirion CRC
+  // SDP6x uses CRC-8 with polynomial 0x31 and initial value 0x00
+  uint8_t calculated_crc = 0x00;  // Initial value for SDP6x CRC
   uint8_t data[2] = {data1, data2};
   
   for (int i = 0; i < 2; i++) {
     calculated_crc ^= data[i];
     for (int bit = 8; bit > 0; --bit) {
       if (calculated_crc & 0x80) {
-        calculated_crc = (calculated_crc << 1) ^ 0x31;  // Sensirion polynomial
+        calculated_crc = (calculated_crc << 1) ^ 0x31;  // SDP6x polynomial
       } else {
         calculated_crc = (calculated_crc << 1);
       }
