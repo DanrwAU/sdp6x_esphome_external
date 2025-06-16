@@ -46,8 +46,6 @@ CONFIG_SCHEMA = (
                     cv.Optional(CONF_RAW, default=False): cv.boolean,
                 }
             ),
-        }
-    )
             cv.Optional(CONF_SCALE_FACTOR): cv.positive_float,
         }
     )
