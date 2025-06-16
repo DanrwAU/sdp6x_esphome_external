@@ -32,7 +32,7 @@ class SDP6XComponent : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *temperature_sensor_{nullptr};
   Config config_;
 
-  bool start_continuous_measurement_();
+  bool trigger_measurement_();
   bool read_measurement_(float &pressure, float &temperature);
   bool check_crc_(uint8_t data1, uint8_t data2, uint8_t crc);
 };

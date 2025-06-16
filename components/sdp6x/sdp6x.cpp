@@ -7,16 +7,15 @@ namespace sdp6x {
 
 static const char *const TAG = "sdp6x";
 
-// SDP6x I2C Commands
-enum SDP6XCommand : uint16_t {
-  START_CONTINUOUS_MEASUREMENT = 0x3603,
-  STOP_CONTINUOUS_MEASUREMENT = 0x3FF9,
-  READ_MEASUREMENT = 0xE000,
+// SDP6x I2C Commands - Based on official datasheet
+enum SDP6XCommand : uint8_t {
+  TRIGGER_MEASUREMENT = 0xF1,
+  SOFT_RESET = 0xFE,
+  READ_USER_REGISTER = 0xE5,
+  WRITE_USER_REGISTER = 0xE4,
 };
 
-static const uint8_t SDP6X_CMD_START_CONT_MEAS[] = {0x36, 0x03};
-static const uint8_t SDP6X_CMD_STOP_CONT_MEAS[] = {0x3F, 0xF9};
-static const uint8_t SDP6X_CMD_READ_MEAS[] = {0xE0, 0x00};
+static const uint8_t SDP6X_CMD_TRIGGER_MEAS = 0xF1;
 
 void SDP6XComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SDP6x...");
@@ -24,8 +23,22 @@ void SDP6XComponent::setup() {
   // Initialize component state
   this->config_.started = false;
   
-  if (!this->start_continuous_measurement_()) {
-    ESP_LOGE(TAG, "Failed to start continuous measurement");
+  // Add delay to ensure sensor is ready after power-up
+  delay(100);
+  
+  // Perform soft reset to ensure clean state
+  ESP_LOGD(TAG, "Performing soft reset...");
+  uint8_t reset_cmd = SOFT_RESET;
+  if (!this->write_bytes_raw(&reset_cmd, 1)) {
+    ESP_LOGW(TAG, "Soft reset failed, continuing anyway");
+  } else {
+    delay(100); // Wait for reset to complete
+  }
+  
+  // Test communication by triggering a measurement
+  ESP_LOGD(TAG, "Testing communication...");
+  if (!this->trigger_measurement_()) {
+    ESP_LOGE(TAG, "Failed to communicate with sensor");
     this->mark_failed();
     return;
   }
@@ -81,83 +94,58 @@ void SDP6XComponent::update() {
   }
 }
 
-bool SDP6XComponent::start_continuous_measurement_() {
-  if (!this->write_bytes(0, SDP6X_CMD_START_CONT_MEAS, sizeof(SDP6X_CMD_START_CONT_MEAS))) {
-    ESP_LOGE(TAG, "Failed to send start continuous measurement command");
+bool SDP6XComponent::trigger_measurement_() {
+  ESP_LOGD(TAG, "Triggering measurement");
+  
+  // Send trigger measurement command (0xF1)
+  uint8_t cmd = SDP6X_CMD_TRIGGER_MEAS;
+  if (!this->write_bytes_raw(&cmd, 1)) {
+    ESP_LOGE(TAG, "Failed to send trigger measurement command");
     return false;
   }
   
-  delay(20);
+  ESP_LOGD(TAG, "Measurement trigger sent successfully");
   return true;
 }
 
 bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
-  uint8_t data[9];
-  
-  if (!this->write_bytes(0, SDP6X_CMD_READ_MEAS, sizeof(SDP6X_CMD_READ_MEAS))) {
-    ESP_LOGE(TAG, "Failed to send read measurement command");
+  // First trigger a measurement
+  if (!this->trigger_measurement_()) {
     return false;
   }
   
+  // Wait for measurement to complete (typical 5ms, use 10ms to be safe)
   delay(10);
   
-  if (!this->read_bytes(0, data, 9)) {
+  // Read 3 bytes: 2 bytes pressure data + 1 byte CRC
+  uint8_t data[3];
+  if (!this->read_bytes_raw(data, 3)) {
     ESP_LOGE(TAG, "Failed to read measurement data");
     return false;
   }
   
-  // Parse pressure data (bytes 0-2)
+  // Parse pressure data (2 bytes, MSB first)
   int16_t pressure_raw = (data[0] << 8) | data[1];
   uint8_t pressure_crc = data[2];
   
-  // Parse temperature data (bytes 3-5)
-  int16_t temp_raw = (data[3] << 8) | data[4];
-  uint8_t temp_crc = data[5];
-  
-  // Parse scale factor (bytes 6-8)
-  int16_t scale_factor_raw = (data[6] << 8) | data[7];
-  uint8_t scale_crc = data[8];
-  
-  // Verify CRC for all data segments
+  // Verify CRC for pressure data
   if (!this->check_crc_(data[0], data[1], pressure_crc)) {
     ESP_LOGE(TAG, "Pressure CRC check failed");
     return false;
   }
   
-  if (!this->check_crc_(data[3], data[4], temp_crc)) {
-    ESP_LOGE(TAG, "Temperature CRC check failed");
-    return false;
-  }
+  // Convert raw pressure value to physical unit
+  // Use configured scale factor (240 for SDP6x0-125Pa)
+  float effective_scale_factor = this->config_.scale_factor > 0.0f ? this->config_.scale_factor : 240.0f;
   
-  if (!this->check_crc_(data[6], data[7], scale_crc)) {
-    ESP_LOGE(TAG, "Scale factor CRC check failed");
-    return false;
-  }
-  
-  // Convert raw values to physical units
-  // Pressure: raw value divided by scale factor gives pressure in Pa
-  float effective_scale_factor;
-  if (this->config_.scale_factor > 0.0f) {
-    // Use manually configured scale factor
-    effective_scale_factor = this->config_.scale_factor;
-    ESP_LOGV(TAG, "Using manual scale factor: %.1f", effective_scale_factor);
-  } else {
-    // Use scale factor from sensor
-    if (scale_factor_raw == 0) {
-      ESP_LOGE(TAG, "Invalid scale factor from sensor (zero)");
-      return false;
-    }
-    effective_scale_factor = (float)scale_factor_raw;
-    ESP_LOGV(TAG, "Using sensor scale factor: %.1f", effective_scale_factor);
-  }
-  
+  // Convert two's complement to signed value
   pressure = (float)pressure_raw / effective_scale_factor;
   
-  // Temperature: raw value divided by 200 gives temperature in °C
-  temperature = (float)temp_raw / 200.0f;
+  // SDP6x doesn't provide temperature - set to NaN or use a default
+  temperature = NAN;
   
-  ESP_LOGV(TAG, "Raw values - Pressure: %d, Temperature: %d, Scale: %d", 
-           pressure_raw, temp_raw, scale_factor_raw);
+  ESP_LOGV(TAG, "Raw pressure: %d, Scale factor: %.1f, Pressure: %.2f Pa", 
+           pressure_raw, effective_scale_factor, pressure);
   
   return true;
 }
