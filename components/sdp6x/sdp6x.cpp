@@ -29,7 +29,7 @@ void SDP6XComponent::setup() {
   // Perform soft reset to ensure clean state
   ESP_LOGD(TAG, "Performing soft reset...");
   uint8_t reset_cmd = SOFT_RESET;
-  if (!this->write_bytes_raw(&reset_cmd, 1)) {
+  if (this->write(&reset_cmd, 1) != i2c::ERROR_OK) {
     ESP_LOGW(TAG, "Soft reset failed, continuing anyway");
   } else {
     delay(100); // Wait for reset to complete
@@ -99,7 +99,7 @@ bool SDP6XComponent::trigger_measurement_() {
   
   // Send trigger measurement command (0xF1)
   uint8_t cmd = SDP6X_CMD_TRIGGER_MEAS;
-  if (!this->write_bytes_raw(&cmd, 1)) {
+  if (this->write(&cmd, 1) != i2c::ERROR_OK) {
     ESP_LOGE(TAG, "Failed to send trigger measurement command");
     return false;
   }
@@ -119,7 +119,7 @@ bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
   
   // Read 3 bytes: 2 bytes pressure data + 1 byte CRC
   uint8_t data[3];
-  if (!this->read_bytes_raw(data, 3)) {
+  if (this->read(data, 3) != i2c::ERROR_OK) {
     ESP_LOGE(TAG, "Failed to read measurement data");
     return false;
   }
