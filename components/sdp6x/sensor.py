@@ -16,6 +16,7 @@ DEPENDENCIES = ["i2c"]
 CONF_DIFFERENTIAL_PRESSURE = "differential_pressure"
 CONF_TEMPERATURE = "temperature"
 CONF_RAW = "raw"
+CONF_SCALE_FACTOR = "scale_factor"
 
 # Namespace and component class
 sdp6x_ns = cg.esphome_ns.namespace("sdp6x")
@@ -47,8 +48,11 @@ CONFIG_SCHEMA = (
             ),
         }
     )
+            cv.Optional(CONF_SCALE_FACTOR): cv.positive_float,
+        }
+    )
     .extend(cv.polling_component_schema("60s"))
-    .extend(i2c.i2c_device_schema(0x25))
+    .extend(i2c.i2c_device_schema(0x40))
 )
 
 
@@ -70,3 +74,6 @@ async def to_code(config):
         cg.add(var.set_temperature_sensor(sens))
         if CONF_RAW in conf:
             cg.add(var.set_temperature_raw(conf[CONF_RAW]))
+    
+    if CONF_SCALE_FACTOR in config:
+        cg.add(var.set_scale_factor(config[CONF_SCALE_FACTOR]))

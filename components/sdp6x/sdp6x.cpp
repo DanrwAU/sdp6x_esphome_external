@@ -38,6 +38,9 @@ void SDP6XComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "SDP6x:");
   LOG_I2C_DEVICE(this);
   LOG_UPDATE_INTERVAL(this);
+  if (this->config_.scale_factor > 0.0f) {
+    ESP_LOGCONFIG(TAG, "  Manual Scale Factor: %.1f", this->config_.scale_factor);
+  }
   LOG_SENSOR("  ", "Differential Pressure", this->pressure_sensor_);
   if (this->pressure_sensor_ != nullptr) {
     ESP_LOGCONFIG(TAG, "    Raw values: %s", YESNO(this->config_.pressure_raw));
@@ -133,12 +136,22 @@ bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
   
   // Convert raw values to physical units
   // Pressure: raw value divided by scale factor gives pressure in Pa
-  if (scale_factor_raw == 0) {
-    ESP_LOGE(TAG, "Invalid scale factor (zero)");
-    return false;
+  float effective_scale_factor;
+  if (this->config_.scale_factor > 0.0f) {
+    // Use manually configured scale factor
+    effective_scale_factor = this->config_.scale_factor;
+    ESP_LOGV(TAG, "Using manual scale factor: %.1f", effective_scale_factor);
+  } else {
+    // Use scale factor from sensor
+    if (scale_factor_raw == 0) {
+      ESP_LOGE(TAG, "Invalid scale factor from sensor (zero)");
+      return false;
+    }
+    effective_scale_factor = (float)scale_factor_raw;
+    ESP_LOGV(TAG, "Using sensor scale factor: %.1f", effective_scale_factor);
   }
   
-  pressure = (float)pressure_raw / (float)scale_factor_raw;
+  pressure = (float)pressure_raw / effective_scale_factor;
   
   // Temperature: raw value divided by 200 gives temperature in °C
   temperature = (float)temp_raw / 200.0f;

@@ -26,6 +26,8 @@ i2c:
 
 sensor:
   - platform: sdp6x
+    address: 0x40  # I2C address (default: 0x40)
+    scale_factor: 240.0  # Optional: manual scale factor override
     differential_pressure:
       name: "Differential Pressure"
       raw: false  # Set to true for raw sensor values
@@ -49,7 +51,8 @@ sensor:
 
 ### Component Options
 - **update_interval** (Optional, default: 60s): How often to read the sensor
-- **address** (Optional, default: 0x25): I2C address of the sensor
+- **address** (Optional, default: 0x40): I2C address of the sensor
+- **scale_factor** (Optional): Manual scale factor override for pressure calculations. If not specified, uses the scale factor from the sensor itself
 
 ## Hardware Connections
 
@@ -63,7 +66,7 @@ sensor:
 ## Supported Sensors
 
 - SDP600 series differential pressure sensors
-- Default I2C address: 0x25
+- Default I2C address: 0x40
 - Voltage: 3.3V operation
 
 ## Example Configuration
@@ -81,7 +84,8 @@ i2c:
 
 sensor:
   - platform: sdp6x
-    address: 0x25
+    address: 0x40
+    scale_factor: 240.0  # Optional: manual scale factor override
     update_interval: 30s
     differential_pressure:
       name: "Room Pressure Difference"
