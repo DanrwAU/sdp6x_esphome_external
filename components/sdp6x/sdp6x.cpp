@@ -7,15 +7,10 @@ namespace sdp6x {
 
 static const char *const TAG = "sdp6x";
 
-// SDP6x I2C Commands - Based on official datasheet
-enum SDP6XCommand : uint8_t {
-  TRIGGER_MEASUREMENT = 0xF1,
-  SOFT_RESET = 0xFE,
-  READ_USER_REGISTER = 0xE5,
-  WRITE_USER_REGISTER = 0xE4,
-};
-
-static const uint8_t SDP6X_CMD_TRIGGER_MEAS = 0xF1;
+static const uint8_t SDP6X_CMD_SOFT_RESET = 0xFE;
+static const uint16_t SDP6X_CMD_START_CONTINUOUS = 0x3603;
+static const uint16_t SDP6X_CMD_READ_MEASUREMENT = 0xE000;
+static const float SDP6X_TEMPERATURE_DIVISOR = 200.0f;
 
 void SDP6XComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SDP6x...");
@@ -24,23 +19,35 @@ void SDP6XComponent::setup() {
   this->config_.started = false;
   
   // Add delay to ensure sensor is ready after power-up
-  delay(100);
+  delay(50);
   
   // Perform soft reset to ensure clean state
   ESP_LOGD(TAG, "Performing soft reset...");
-  uint8_t reset_cmd = SOFT_RESET;
+  uint8_t reset_cmd = SDP6X_CMD_SOFT_RESET;
   if (this->write(&reset_cmd, 1) != i2c::ERROR_OK) {
     ESP_LOGW(TAG, "Soft reset failed, continuing anyway");
   } else {
-    delay(100); // Wait for reset to complete
+    delay(20);  // Wait for reset to complete
   }
   
-  // Test communication by triggering a measurement
-  ESP_LOGD(TAG, "Testing communication...");
-  if (!this->trigger_measurement_()) {
-    ESP_LOGE(TAG, "Failed to communicate with sensor");
+  // Start continuous measurement mode as recommended by Sensirion
+  if (!this->start_continuous_measurement_()) {
+    ESP_LOGE(TAG, "Failed to start continuous measurement mode");
     this->mark_failed();
     return;
+  }
+  ESP_LOGD(TAG, "Continuous measurement mode started");
+
+  // Attempt an initial read to prime scale factor cache
+  delay(50);
+  int16_t pressure_raw;
+  int16_t temperature_raw;
+  uint16_t scale_raw;
+  if (this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
+    this->sensor_scale_factor_ = static_cast<float>(scale_raw);
+    ESP_LOGD(TAG, "Initial scale factor: %.1f", this->sensor_scale_factor_);
+  } else {
+    ESP_LOGW(TAG, "Initial measurement not available yet; will retry during updates");
   }
   
   this->config_.started = true;
@@ -53,6 +60,8 @@ void SDP6XComponent::dump_config() {
   LOG_UPDATE_INTERVAL(this);
   if (this->config_.scale_factor > 0.0f) {
     ESP_LOGCONFIG(TAG, "  Manual Scale Factor: %.1f", this->config_.scale_factor);
+  } else if (this->sensor_scale_factor_ > 0.0f) {
+    ESP_LOGCONFIG(TAG, "  Sensor Scale Factor: %.1f", this->sensor_scale_factor_);
   }
   LOG_SENSOR("  ", "Differential Pressure", this->pressure_sensor_);
   if (this->pressure_sensor_ != nullptr) {
@@ -71,104 +80,117 @@ void SDP6XComponent::update() {
     return;
   }
 
-  float pressure, temperature;
-  
-  if (!this->read_measurement_(pressure, temperature)) {
+  int16_t pressure_raw;
+  int16_t temperature_raw;
+  uint16_t scale_raw;
+
+  if (!this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
     ESP_LOGW(TAG, "Failed to read measurement data");
     this->status_set_warning("Failed to read sensor data");
     return;
   }
-  
+
+  if (scale_raw > 0) {
+    this->sensor_scale_factor_ = static_cast<float>(scale_raw);
+  }
+
+  float effective_scale = this->config_.scale_factor > 0.0f
+                              ? this->config_.scale_factor
+                              : (scale_raw > 0 ? static_cast<float>(scale_raw) : this->sensor_scale_factor_);
+  // Prefer manual scale factor, otherwise use the most recent value reported by the sensor.
+  if (effective_scale <= 0.0f) {
+    ESP_LOGW(TAG, "Effective scale factor invalid: %.1f", effective_scale);
+    this->status_set_warning("Invalid scale factor");
+    return;
+  }
+
+  float pressure_processed = static_cast<float>(pressure_raw) / effective_scale;
+  float temperature_processed = static_cast<float>(temperature_raw) / SDP6X_TEMPERATURE_DIVISOR;
+
   this->status_clear_warning();
-  
+
   if (this->pressure_sensor_ != nullptr) {
-    float processed_pressure = this->config_.pressure_raw ? pressure : pressure;
-    this->pressure_sensor_->publish_state(processed_pressure);
-    ESP_LOGD(TAG, "Pressure: %.2f Pa (raw: %s)", processed_pressure, YESNO(this->config_.pressure_raw));
+    float publish_value = this->config_.pressure_raw ? static_cast<float>(pressure_raw) : pressure_processed;
+    this->pressure_sensor_->publish_state(publish_value);
+    ESP_LOGD(TAG, "Pressure raw=%d, processed=%.3f Pa (scale %.1f, raw_mode=%s)",
+             pressure_raw, pressure_processed, effective_scale, YESNO(this->config_.pressure_raw));
   }
-  
+
   if (this->temperature_sensor_ != nullptr) {
-    float processed_temperature = this->config_.temperature_raw ? temperature : temperature;
-    this->temperature_sensor_->publish_state(processed_temperature);
-    ESP_LOGD(TAG, "Temperature: %.1f °C (raw: %s)", processed_temperature, YESNO(this->config_.temperature_raw));
+    float publish_value = this->config_.temperature_raw ? static_cast<float>(temperature_raw) : temperature_processed;
+    this->temperature_sensor_->publish_state(publish_value);
+    ESP_LOGD(TAG, "Temperature raw=%d, processed=%.2f °C (raw_mode=%s)",
+             temperature_raw, temperature_processed, YESNO(this->config_.temperature_raw));
   }
 }
 
-bool SDP6XComponent::trigger_measurement_() {
-  ESP_LOGD(TAG, "Triggering measurement");
-  
-  // Send trigger measurement command (0xF1)
-  uint8_t cmd = SDP6X_CMD_TRIGGER_MEAS;
-  if (this->write(&cmd, 1) != i2c::ERROR_OK) {
-    ESP_LOGE(TAG, "Failed to send trigger measurement command");
+bool SDP6XComponent::start_continuous_measurement_() {
+  uint8_t cmd[2] = {static_cast<uint8_t>(SDP6X_CMD_START_CONTINUOUS >> 8),
+                    static_cast<uint8_t>(SDP6X_CMD_START_CONTINUOUS & 0xFF)};
+  if (this->write(cmd, sizeof(cmd)) != i2c::ERROR_OK) {
+    ESP_LOGE(TAG, "Failed to start continuous measurement (cmd=0x%02X%02X)", cmd[0], cmd[1]);
     return false;
   }
-  
-  ESP_LOGD(TAG, "Measurement trigger sent successfully");
   return true;
 }
 
-bool SDP6XComponent::read_measurement_(float &pressure, float &temperature) {
-  // First trigger a measurement
-  if (!this->trigger_measurement_()) {
+bool SDP6XComponent::read_measurement_block_(int16_t &pressure_raw, int16_t &temperature_raw, uint16_t &scale_raw) {
+  uint8_t read_cmd[2] = {static_cast<uint8_t>(SDP6X_CMD_READ_MEASUREMENT >> 8),
+                         static_cast<uint8_t>(SDP6X_CMD_READ_MEASUREMENT & 0xFF)};
+  if (this->write(read_cmd, sizeof(read_cmd)) != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Failed to issue read measurement command");
     return false;
   }
-  
-  // Wait for measurement to complete (typical 5ms, use 10ms to be safe)
-  delay(10);
-  
-  // Read 3 bytes: 2 bytes pressure data + 1 byte CRC
-  uint8_t data[3];
-  if (this->read(data, 3) != i2c::ERROR_OK) {
-    ESP_LOGE(TAG, "Failed to read measurement data");
+
+  delay(5);  // Allow sensor to prepare the data
+
+  // Sensor returns pressure, temperature, and scale factor segments (each 2 bytes + CRC)
+  uint8_t data[9];
+  if (this->read(data, sizeof(data)) != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Failed to read measurement bytes");
     return false;
   }
-  
-  // Parse pressure data (2 bytes, MSB first)
-  int16_t pressure_raw = (data[0] << 8) | data[1];
-  uint8_t pressure_crc = data[2];
-  
-  // Verify CRC for pressure data
-  ESP_LOGD(TAG, "Raw data: 0x%02X 0x%02X, CRC: 0x%02X", data[0], data[1], pressure_crc);
-  if (!this->check_crc_(data[0], data[1], pressure_crc)) {
-    ESP_LOGW(TAG, "Pressure CRC check failed - received: 0x%02X, continuing anyway for debugging", pressure_crc);
-    // Temporarily continue processing even with CRC failure for debugging
-    // return false;
+
+  ESP_LOGV(TAG, "Raw buffer: %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+           data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
+
+  if (!this->check_crc_(&data[0], 2, data[2])) {
+    ESP_LOGW(TAG, "Pressure CRC check failed (got 0x%02X)", data[2]);
+    return false;
   }
-  
-  // Convert raw pressure value to physical unit
-  // Use configured scale factor (240 for SDP6x0-125Pa)
-  float effective_scale_factor = this->config_.scale_factor > 0.0f ? this->config_.scale_factor : 240.0f;
-  
-  // Convert two's complement to signed value
-  pressure = (float)pressure_raw / effective_scale_factor;
-  
-  // SDP6x doesn't provide temperature - set to NaN or use a default
-  temperature = NAN;
-  
-  ESP_LOGV(TAG, "Raw pressure: %d, Scale factor: %.1f, Pressure: %.2f Pa", 
-           pressure_raw, effective_scale_factor, pressure);
-  
+  if (!this->check_crc_(&data[3], 2, data[5])) {
+    ESP_LOGW(TAG, "Temperature CRC check failed (got 0x%02X)", data[5]);
+    return false;
+  }
+  if (!this->check_crc_(&data[6], 2, data[8])) {
+    ESP_LOGW(TAG, "Scale factor CRC check failed (got 0x%02X)", data[8]);
+    return false;
+  }
+
+  uint16_t pressure_u = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+  uint16_t temperature_u = (static_cast<uint16_t>(data[3]) << 8) | data[4];
+  scale_raw = (static_cast<uint16_t>(data[6]) << 8) | data[7];
+
+  pressure_raw = static_cast<int16_t>(pressure_u);
+  temperature_raw = static_cast<int16_t>(temperature_u);
+
   return true;
 }
 
-bool SDP6XComponent::check_crc_(uint8_t data1, uint8_t data2, uint8_t crc) {
-  // SDP6x uses CRC-8 with polynomial 0x31 and initial value 0x00
+bool SDP6XComponent::check_crc_(const uint8_t *data, size_t length, uint8_t crc) {
   uint8_t calculated_crc = 0x00;  // Initial value for SDP6x CRC
-  uint8_t data[2] = {data1, data2};
-  
-  for (int i = 0; i < 2; i++) {
+
+  for (size_t i = 0; i < length; i++) {
     calculated_crc ^= data[i];
-    for (int bit = 8; bit > 0; --bit) {
+    for (int bit = 0; bit < 8; ++bit) {
       if (calculated_crc & 0x80) {
-        calculated_crc = (calculated_crc << 1) ^ 0x31;  // SDP6x polynomial
+        calculated_crc = static_cast<uint8_t>((calculated_crc << 1) ^ 0x31);
       } else {
-        calculated_crc = (calculated_crc << 1);
+        calculated_crc <<= 1;
       }
     }
   }
-  
-  ESP_LOGD(TAG, "CRC calculated: 0x%02X, received: 0x%02X", calculated_crc, crc);
+
   return calculated_crc == crc;
 }
 

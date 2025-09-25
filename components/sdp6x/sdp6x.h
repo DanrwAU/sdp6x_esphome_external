@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/i2c/i2c.h"
@@ -31,10 +34,11 @@ class SDP6XComponent : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *pressure_sensor_{nullptr};
   sensor::Sensor *temperature_sensor_{nullptr};
   Config config_;
+  float sensor_scale_factor_{0.0f};
 
-  bool trigger_measurement_();
-  bool read_measurement_(float &pressure, float &temperature);
-  bool check_crc_(uint8_t data1, uint8_t data2, uint8_t crc);
+  bool start_continuous_measurement_();
+  bool read_measurement_block_(int16_t &pressure_raw, int16_t &temperature_raw, uint16_t &scale_raw);
+  bool check_crc_(const uint8_t *data, size_t length, uint8_t crc);
 };
 
 }  // namespace sdp6x
