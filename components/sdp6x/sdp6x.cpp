@@ -50,14 +50,28 @@ void SDP6XComponent::setup() {
     }
   } else {
     ESP_LOGW(TAG, "Continuous mode not acknowledged; switching to single-shot mode");
-    int16_t pressure_test;
-    if (!this->read_legacy_measurement_(pressure_test)) {
-      ESP_LOGE(TAG, "Single-shot measurement failed; sensor not responding");
-      this->mark_failed();
-      return;
-    }
     this->mode_ = SensorMode::SINGLE_SHOT;
     this->temperature_supported_ = false;
+
+    bool legacy_ready = false;
+    int16_t pressure_test;
+    for (uint8_t attempt = 0; attempt < 3 && !legacy_ready; ++attempt) {
+      if (this->read_legacy_measurement_(pressure_test)) {
+        legacy_ready = true;
+        break;
+      }
+      ESP_LOGW(TAG, "Legacy measurement attempt %u failed, retrying", static_cast<unsigned>(attempt + 1));
+      delay(25);
+    }
+
+    if (!legacy_ready) {
+      ESP_LOGE(TAG, "Single-shot warm-up failed; keeping component active for retries");
+      this->status_set_warning("Waiting for sensor");
+    } else {
+      this->status_clear_warning();
+      ESP_LOGD(TAG, "Legacy mode initial pressure sample: %d counts", pressure_test);
+    }
+
     if (this->config_.scale_factor > 0.0f) {
       this->sensor_scale_factor_ = this->config_.scale_factor;
     } else {
@@ -261,7 +275,8 @@ bool SDP6XComponent::read_legacy_measurement_(int16_t &pressure_raw) {
     return false;
   }
 
-  delay(10);  // Give the sensor time to perform the measurement
+  // Sensirion app note recommends up to 100 ms for legacy trigger measurements.
+  delay(100);
 
   uint8_t data[3];
   if (this->read(data, sizeof(data)) != i2c::ERROR_OK) {
