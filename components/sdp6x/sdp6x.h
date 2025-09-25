@@ -35,9 +35,17 @@ class SDP6XComponent : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *temperature_sensor_{nullptr};
   Config config_;
   float sensor_scale_factor_{0.0f};
+  enum class SensorMode {
+    UNKNOWN,
+    CONTINUOUS,
+    SINGLE_SHOT,
+  };
+  SensorMode mode_{SensorMode::UNKNOWN};
+  bool temperature_supported_{false};
 
   bool start_continuous_measurement_();
   bool read_measurement_block_(int16_t &pressure_raw, int16_t &temperature_raw, uint16_t &scale_raw);
+  bool read_legacy_measurement_(int16_t &pressure_raw);
   bool check_crc_(const uint8_t *data, size_t length, uint8_t crc);
 };
 

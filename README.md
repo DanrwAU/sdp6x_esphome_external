@@ -26,7 +26,7 @@ i2c:
 
 sensor:
   - platform: sdp6x
-    address: 0x25  # I2C address (default: 0x25)
+    address: 0x40  # I2C address (default: 0x40, some modules use 0x25)
     scale_factor: 240.0  # Optional: manual scale factor override
     differential_pressure:
       name: "Differential Pressure"
@@ -51,8 +51,8 @@ sensor:
 
 ### Component Options
 - **update_interval** (Optional, default: 60s): How often to read the sensor
-- **address** (Optional, default: 0x25): I2C address of the sensor
-- **scale_factor** (Optional): Manual scale factor override for pressure calculations. If not specified, uses the scale factor from the sensor itself
+- **address** (Optional, default: 0x40): I2C address of the sensor (some breakout boards use 0x25)
+- **scale_factor** (Optional): Manual scale factor override for pressure calculations. If not specified, uses the scale factor from the sensor itself; required when the firmware falls back to legacy single-shot mode because those sensors do not report it.
 
 ## Hardware Connections
 
@@ -66,7 +66,7 @@ sensor:
 ## Supported Sensors
 
 - SDP600 series differential pressure sensors
-- Default I2C address: 0x25
+- Default I2C address: 0x40 (certain compact modules report 0x25)
 - Voltage: 3.3V operation
 
 ## Example Configuration
@@ -84,7 +84,7 @@ i2c:
 
 sensor:
   - platform: sdp6x
-    address: 0x25
+    address: 0x40
     scale_factor: 240.0  # Optional: manual scale factor override
     update_interval: 30s
     differential_pressure:
@@ -108,3 +108,4 @@ sensor:
 - **Sensor not found**: Check I2C wiring and use `scan: true` in I2C config to verify address
 - **CRC errors**: Check power supply stability and I2C pull-up resistors
 - **Intermittent readings**: Ensure stable 3.3V power supply and proper grounding
+- **Single-shot mode**: Some legacy SDP6x variants only support the single-shot command set. When this happens the firmware logs "Legacy single-shot mode" and you must provide `scale_factor` in the YAML configuration because the sensor does not report it.

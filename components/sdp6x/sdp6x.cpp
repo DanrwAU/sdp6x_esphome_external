@@ -1,6 +1,7 @@
 #include "sdp6x.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include <cmath>
 
 namespace esphome {
 namespace sdp6x {
@@ -30,24 +31,40 @@ void SDP6XComponent::setup() {
     delay(20);  // Wait for reset to complete
   }
   
-  // Start continuous measurement mode as recommended by Sensirion
-  if (!this->start_continuous_measurement_()) {
-    ESP_LOGE(TAG, "Failed to start continuous measurement mode");
-    this->mark_failed();
-    return;
-  }
-  ESP_LOGD(TAG, "Continuous measurement mode started");
+  // Try to start continuous mode first; fall back to single-shot if it fails
+  if (this->start_continuous_measurement_()) {
+    ESP_LOGD(TAG, "Continuous measurement mode started");
+    this->mode_ = SensorMode::CONTINUOUS;
+    this->temperature_supported_ = true;
 
-  // Attempt an initial read to prime scale factor cache
-  delay(50);
-  int16_t pressure_raw;
-  int16_t temperature_raw;
-  uint16_t scale_raw;
-  if (this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
-    this->sensor_scale_factor_ = static_cast<float>(scale_raw);
-    ESP_LOGD(TAG, "Initial scale factor: %.1f", this->sensor_scale_factor_);
+    // Attempt an initial read to prime scale factor cache
+    delay(50);
+    int16_t pressure_raw;
+    int16_t temperature_raw;
+    uint16_t scale_raw;
+    if (this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
+      this->sensor_scale_factor_ = static_cast<float>(scale_raw);
+      ESP_LOGD(TAG, "Initial scale factor: %.1f", this->sensor_scale_factor_);
+    } else {
+      ESP_LOGW(TAG, "Initial measurement not available yet; will retry during updates");
+    }
   } else {
-    ESP_LOGW(TAG, "Initial measurement not available yet; will retry during updates");
+    ESP_LOGW(TAG, "Continuous mode not acknowledged; switching to single-shot mode");
+    int16_t pressure_test;
+    if (!this->read_legacy_measurement_(pressure_test)) {
+      ESP_LOGE(TAG, "Single-shot measurement failed; sensor not responding");
+      this->mark_failed();
+      return;
+    }
+    this->mode_ = SensorMode::SINGLE_SHOT;
+    this->temperature_supported_ = false;
+    if (this->config_.scale_factor > 0.0f) {
+      this->sensor_scale_factor_ = this->config_.scale_factor;
+    } else {
+      this->sensor_scale_factor_ = 0.0f;
+      ESP_LOGW(TAG, "Set 'scale_factor' in YAML to convert raw pressure counts in single-shot mode");
+    }
+    ESP_LOGCONFIG(TAG, "Legacy single-shot mode active");
   }
   
   this->config_.started = true;
@@ -58,6 +75,18 @@ void SDP6XComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "SDP6x:");
   LOG_I2C_DEVICE(this);
   LOG_UPDATE_INTERVAL(this);
+  const char *mode_str = "unknown";
+  switch (this->mode_) {
+    case SensorMode::CONTINUOUS:
+      mode_str = "continuous";
+      break;
+    case SensorMode::SINGLE_SHOT:
+      mode_str = "single-shot";
+      break;
+    default:
+      break;
+  }
+  ESP_LOGCONFIG(TAG, "  Mode: %s", mode_str);
   if (this->config_.scale_factor > 0.0f) {
     ESP_LOGCONFIG(TAG, "  Manual Scale Factor: %.1f", this->config_.scale_factor);
   } else if (this->sensor_scale_factor_ > 0.0f) {
@@ -80,47 +109,94 @@ void SDP6XComponent::update() {
     return;
   }
 
-  int16_t pressure_raw;
-  int16_t temperature_raw;
-  uint16_t scale_raw;
+  switch (this->mode_) {
+    case SensorMode::CONTINUOUS: {
+      int16_t pressure_raw;
+      int16_t temperature_raw;
+      uint16_t scale_raw;
 
-  if (!this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
-    ESP_LOGW(TAG, "Failed to read measurement data");
-    this->status_set_warning("Failed to read sensor data");
-    return;
-  }
+      if (!this->read_measurement_block_(pressure_raw, temperature_raw, scale_raw)) {
+        ESP_LOGW(TAG, "Failed to read measurement data");
+        this->status_set_warning("Failed to read sensor data");
+        return;
+      }
 
-  if (scale_raw > 0) {
-    this->sensor_scale_factor_ = static_cast<float>(scale_raw);
-  }
+      if (scale_raw > 0) {
+        this->sensor_scale_factor_ = static_cast<float>(scale_raw);
+      }
 
-  float effective_scale = this->config_.scale_factor > 0.0f
-                              ? this->config_.scale_factor
-                              : (scale_raw > 0 ? static_cast<float>(scale_raw) : this->sensor_scale_factor_);
-  // Prefer manual scale factor, otherwise use the most recent value reported by the sensor.
-  if (effective_scale <= 0.0f) {
-    ESP_LOGW(TAG, "Effective scale factor invalid: %.1f", effective_scale);
-    this->status_set_warning("Invalid scale factor");
-    return;
-  }
+      float effective_scale = this->config_.scale_factor > 0.0f
+                                  ? this->config_.scale_factor
+                                  : (scale_raw > 0 ? static_cast<float>(scale_raw) : this->sensor_scale_factor_);
+      // Prefer manual scale factor, otherwise use the most recent value reported by the sensor.
+      if (effective_scale <= 0.0f) {
+        ESP_LOGW(TAG, "Effective scale factor invalid: %.1f", effective_scale);
+        this->status_set_warning("Invalid scale factor");
+        return;
+      }
 
-  float pressure_processed = static_cast<float>(pressure_raw) / effective_scale;
-  float temperature_processed = static_cast<float>(temperature_raw) / SDP6X_TEMPERATURE_DIVISOR;
+      float pressure_processed = static_cast<float>(pressure_raw) / effective_scale;
+      float temperature_processed = static_cast<float>(temperature_raw) / SDP6X_TEMPERATURE_DIVISOR;
 
-  this->status_clear_warning();
+      this->status_clear_warning();
 
-  if (this->pressure_sensor_ != nullptr) {
-    float publish_value = this->config_.pressure_raw ? static_cast<float>(pressure_raw) : pressure_processed;
-    this->pressure_sensor_->publish_state(publish_value);
-    ESP_LOGD(TAG, "Pressure raw=%d, processed=%.3f Pa (scale %.1f, raw_mode=%s)",
-             pressure_raw, pressure_processed, effective_scale, YESNO(this->config_.pressure_raw));
-  }
+      if (this->pressure_sensor_ != nullptr) {
+        float publish_value = this->config_.pressure_raw ? static_cast<float>(pressure_raw) : pressure_processed;
+        this->pressure_sensor_->publish_state(publish_value);
+        ESP_LOGD(TAG, "Pressure raw=%d, processed=%.3f Pa (scale %.1f, raw_mode=%s)",
+                 pressure_raw, pressure_processed, effective_scale, YESNO(this->config_.pressure_raw));
+      }
 
-  if (this->temperature_sensor_ != nullptr) {
-    float publish_value = this->config_.temperature_raw ? static_cast<float>(temperature_raw) : temperature_processed;
-    this->temperature_sensor_->publish_state(publish_value);
-    ESP_LOGD(TAG, "Temperature raw=%d, processed=%.2f °C (raw_mode=%s)",
-             temperature_raw, temperature_processed, YESNO(this->config_.temperature_raw));
+      if (this->temperature_sensor_ != nullptr && this->temperature_supported_) {
+        float publish_value = this->config_.temperature_raw ? static_cast<float>(temperature_raw) : temperature_processed;
+        this->temperature_sensor_->publish_state(publish_value);
+        ESP_LOGD(TAG, "Temperature raw=%d, processed=%.2f °C (raw_mode=%s)",
+                 temperature_raw, temperature_processed, YESNO(this->config_.temperature_raw));
+      } else if (this->temperature_sensor_ != nullptr) {
+        this->temperature_sensor_->publish_state(NAN);
+      }
+      break;
+    }
+
+    case SensorMode::SINGLE_SHOT: {
+      int16_t pressure_raw;
+      if (!this->read_legacy_measurement_(pressure_raw)) {
+        ESP_LOGW(TAG, "Failed to read single-shot measurement");
+        this->status_set_warning("Failed to read sensor data");
+        return;
+      }
+
+      float effective_scale = this->config_.scale_factor > 0.0f ? this->config_.scale_factor : this->sensor_scale_factor_;
+      if (effective_scale <= 0.0f) {
+        // No scale factor available from sensor; require manual override
+        ESP_LOGW(TAG, "Provide scale_factor in config for single-shot mode");
+        this->status_set_warning("Missing scale factor");
+        return;
+      }
+
+      float pressure_processed = static_cast<float>(pressure_raw) / effective_scale;
+
+      this->status_clear_warning();
+
+      if (this->pressure_sensor_ != nullptr) {
+        float publish_value = this->config_.pressure_raw ? static_cast<float>(pressure_raw) : pressure_processed;
+        this->pressure_sensor_->publish_state(publish_value);
+        ESP_LOGD(TAG, "Pressure raw=%d, processed=%.3f Pa (scale %.1f, raw_mode=%s)",
+                 pressure_raw, pressure_processed, effective_scale, YESNO(this->config_.pressure_raw));
+      }
+
+      if (this->temperature_sensor_ != nullptr) {
+        // Temperature is not available in single-shot mode
+        this->temperature_sensor_->publish_state(NAN);
+      }
+      break;
+    }
+
+    case SensorMode::UNKNOWN:
+    default:
+      ESP_LOGW(TAG, "Sensor mode not initialised");
+      this->status_set_warning("Sensor not initialised");
+      break;
   }
 }
 
@@ -173,6 +249,32 @@ bool SDP6XComponent::read_measurement_block_(int16_t &pressure_raw, int16_t &tem
 
   pressure_raw = static_cast<int16_t>(pressure_u);
   temperature_raw = static_cast<int16_t>(temperature_u);
+
+  return true;
+}
+
+bool SDP6XComponent::read_legacy_measurement_(int16_t &pressure_raw) {
+  // Send trigger measurement command (0xF1)
+  uint8_t cmd = 0xF1;
+  if (this->write(&cmd, 1) != i2c::ERROR_OK) {
+    ESP_LOGV(TAG, "Trigger command not acknowledged");
+    return false;
+  }
+
+  delay(10);  // Give the sensor time to perform the measurement
+
+  uint8_t data[3];
+  if (this->read(data, sizeof(data)) != i2c::ERROR_OK) {
+    ESP_LOGV(TAG, "Failed to read legacy measurement bytes");
+    return false;
+  }
+
+  if (!this->check_crc_(data, 2, data[2])) {
+    ESP_LOGW(TAG, "Legacy pressure CRC failed (got 0x%02X)", data[2]);
+    return false;
+  }
+
+  pressure_raw = static_cast<int16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
 
   return true;
 }
